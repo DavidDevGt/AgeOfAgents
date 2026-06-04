@@ -8,16 +8,18 @@ type RayKind int
 const (
 	HitNone RayKind = iota
 	HitWall
+	HitCover
 	HitPlayer
 	HitSmoke
 )
 
 type RayResult struct {
-	Hit    bool
-	T      float64 // distancia a lo largo del rayo
-	X, Y   float64 // punto de impacto
-	Kind   RayKind
-	Target *Player // si Kind == HitPlayer
+	Hit      bool
+	T        float64 // distancia a lo largo del rayo
+	X, Y     float64 // punto de impacto
+	Kind     RayKind
+	Target   *Player // si Kind == HitPlayer
+	CoverIdx int     // índice en w.Covers si Kind == HitCover
 }
 
 // rayAABB: intersección rayo-AABB por el método de los slabs.
@@ -93,9 +95,20 @@ func rayCircle(ox, oy, dx, dy, cx, cy, r, maxT float64) (float64, bool) {
 func (w *World) Cast(ox, oy, dx, dy, maxDist float64, shooter *Player, blockBySmoke bool) RayResult {
 	res := RayResult{T: maxDist}
 
+	// Muros indestructibles primero.
 	for i := range w.Walls {
 		if t, ok := rayAABB(ox, oy, dx, dy, w.Walls[i], res.T); ok {
 			res.Hit, res.T, res.Kind, res.Target = true, t, HitWall, nil
+		}
+	}
+
+	// Coberturas destruibles activas: una bala que las toca se detiene (no
+	// atraviesa) y nos dice qué cobertura golpeó para descontarle vida.
+	for i := range w.Covers {
+		if w.Covers[i].Active {
+			if t, ok := rayAABB(ox, oy, dx, dy, w.Covers[i].Box, res.T); ok {
+				res.Hit, res.T, res.Kind, res.Target, res.CoverIdx = true, t, HitCover, nil, i
+			}
 		}
 	}
 

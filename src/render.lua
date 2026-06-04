@@ -85,6 +85,60 @@ local function drawArena(view)
 end
 
 -- ============================================================================
+-- COBERTURAS DESTRUIBLES: parapetos de madera. El feedback de daño dibuja
+-- grietas crecientes y baja el alpha según la vida restante (autoritativa).
+-- ============================================================================
+local function drawCovers(view)
+    local g = love.graphics
+    for id = 1, view.coversMaxId do
+        local c = view.covers[id]
+        if c and c.active then
+            local x, y, w, h = c.x, c.y, c.w, c.h
+            local frac = c.hp / c.maxhp            -- 1 intacta .. 0 a punto de romper
+            if frac < 0 then frac = 0 end
+            local a = 0.78 + 0.22 * frac           -- el daño la "desgasta" (alpha)
+
+            -- Sombra proyectada.
+            g.setColor(0, 0, 0, 0.30)
+            g.rectangle("fill", x + 3, y + 4, w, h)
+            -- Cuerpo de madera (marrón táctico) + tablones.
+            g.setColor(0.46 * a, 0.30 * a, 0.16 * a, 1)
+            g.rectangle("fill", x, y, w, h)
+            g.setColor(0.56, 0.39, 0.21, a)
+            g.rectangle("fill", x, y + h * 0.5 - 1, w, 2)        -- veta horizontal
+            g.rectangle("fill", x + w * 0.5 - 1, y, 2, h)        -- veta vertical
+            -- Refuerzos metálicos en las esquinas.
+            g.setColor(0.32, 0.33, 0.36, a)
+            g.rectangle("fill", x, y, 5, 5);          g.rectangle("fill", x + w - 5, y, 5, 5)
+            g.rectangle("fill", x, y + h - 5, 5, 5);  g.rectangle("fill", x + w - 5, y + h - 5, 5, 5)
+            -- Contorno.
+            g.setColor(0.22, 0.14, 0.07, a)
+            g.setLineWidth(2)
+            g.rectangle("line", x, y, w, h)
+
+            -- Grietas: aparecen progresivamente según el daño (deterministas).
+            local cracks = math.floor((1 - frac) * 4 + 0.001)   -- 0..3
+            if cracks > 0 then
+                g.setColor(0.10, 0.06, 0.03, a)
+                g.setLineWidth(1.5)
+                local cx, cy = c.cx, c.cy
+                for k = 1, cracks do
+                    -- Ángulo estable por (id,k): sin asignaciones ni aleatoriedad.
+                    local ang = (id * 1.7 + k * 2.3)
+                    local ex = cx + math.cos(ang) * w * 0.5
+                    local ey = cy + math.sin(ang) * h * 0.5
+                    local mx = cx + math.cos(ang + 0.5) * w * 0.22
+                    local my = cy + math.sin(ang + 0.5) * h * 0.22
+                    g.line(cx, cy, mx, my)                       -- grieta quebrada
+                    g.line(mx, my, ex, ey)
+                end
+            end
+        end
+    end
+    g.setLineWidth(1)
+end
+
+-- ============================================================================
 -- BANDERA / BASE MILITAR (overtime). Base + zona de captura + mástil con izado.
 -- ============================================================================
 local function drawFlag(view)
@@ -389,166 +443,6 @@ local function drawPlayer(p, isLocal)
     g.setLineWidth(1)
 end
 
--- ============================================================================
--- HUD estilo COD: marcador + temporizador arriba, vida/munición abajo.
--- ============================================================================
-local function drawHUD(nc, fonts)
-    local g = love.graphics
-    local view = nc.view
-    local m = view.match
-    local W, H = g.getWidth(), g.getHeight()
-    local t = love.timer.getTime()
-    local overtime = (m.phase == "overtime")
-
-    -- ---- Marcador + temporizador (centro superior) ----
-    local panelW = 260
-    g.setColor(0, 0, 0, 0.55)
-    g.rectangle("fill", W / 2 - panelW / 2, 8, panelW, 52, 6)
-
-    g.setFont(fonts.mid)
-    g.setColor(0.30, 0.62, 1.0)
-    g.printf(tostring(m.scores[1]), W / 2 - panelW / 2 + 8, 14, 60, "center")
-    g.setColor(1.0, 0.45, 0.32)
-    g.printf(tostring(m.scores[2]), W / 2 + panelW / 2 - 68, 14, 60, "center")
-    g.setColor(0.6, 0.6, 0.65)
-    g.printf("AZUL", W / 2 - panelW / 2 + 8, 40, 60, "center")
-    g.printf("ROJO", W / 2 + panelW / 2 - 68, 40, 60, "center")
-
-    -- Temporizador central: rojo y parpadeante en overtime.
-    g.setFont(fonts.mid)
-    if overtime then
-        local blink = (math.sin(t * 8) > 0)
-        g.setColor(1, blink and 0.25 or 0.5, 0.25)
-        g.printf(string.format("OT %0.0f", m.overtimeLeft or 0), W / 2 - 60, 12, 120, "center")
-        g.setFont(fonts.small)
-        g.setColor(1, 1, 1)
-        g.printf(string.format("CAPTURA %d%%", math.floor((m.captureFrac or 0) * 100)),
-                 W / 2 - 60, 38, 120, "center")
-    else
-        g.setColor(1, 1, 1)
-        g.printf(string.format("%0.1f", m.roundTime), W / 2 - 60, 18, 120, "center")
-    end
-
-    g.setFont(fonts.small)
-    g.setColor(0.7, 0.7, 0.75)
-    g.printf("Ronda " .. (m.roundNumber or 0), 0, 64, W, "center")
-
-    -- ---- Panel inferior del jugador local ----
-    local me = view.players[nc.myId]
-    if me then
-        -- Vida (barra limpia abajo-izquierda) + loadout en mayúsculas.
-        local bx, by, bw, bh = 24, H - 56, 300, 18
-        local hp = me.hp or 0
-        local frac = hp / MAX_HP
-        if frac < 0 then frac = 0 end
-        g.setColor(0, 0, 0, 0.5)
-        g.rectangle("fill", bx - 4, by - 26, bw + 8, 52, 6)
-        g.setFont(fonts.small)
-        g.setColor(0.9, 0.9, 0.95)
-        g.print(string.upper(m.loadout or "-"), bx, by - 22)
-        g.setColor(0.15, 0.15, 0.17)
-        g.rectangle("fill", bx, by, bw, bh, 3)
-        -- Color de vida: verde -> rojo, parpadea si crítica.
-        local crit = (hp <= 25) and (math.sin(t * 10) > 0)
-        g.setColor(crit and 1 or (1 - frac), crit and 0.2 or (frac * 0.9 + 0.1), 0.15)
-        g.rectangle("fill", bx, by, bw * frac, bh, 3)
-        g.setColor(0, 0, 0, 0.6)
-        g.setLineWidth(1)
-        g.rectangle("line", bx, by, bw, bh, 3)
-        g.setFont(fonts.mid)
-        g.setColor(1, 1, 1)
-        g.print(tostring(math.floor(hp)), bx + bw + 12, by - 6)
-
-        -- Munición (grande, abajo-derecha) + nombre del arma.
-        g.setColor(0, 0, 0, 0.5)
-        g.rectangle("fill", W - 244, H - 64, 220, 56, 6)
-        g.setFont(fonts.small)
-        g.setColor(0.8, 0.8, 0.85)
-        g.printf(me.wname or "-", W - 240, H - 60, 212, "right")
-        g.setFont(fonts.ammo or fonts.big)
-        if me.mag and me.mag < 0 then
-            g.setColor(0.6, 0.85, 1.0)
-            g.printf("∞", W - 240, H - 44, 212, "right")
-        elseif me.reloading then
-            g.setColor(1, 0.7, 0.2)
-            g.setFont(fonts.mid)
-            g.printf("RECARGANDO", W - 240, H - 36, 212, "right")
-        else
-            local lowAmmo = (me.ammo or 0) <= 3
-            g.setColor(lowAmmo and 1 or 1, lowAmmo and 0.4 or 0.95, lowAmmo and 0.2 or 0.5)
-            g.printf(tostring(me.ammo or 0), W - 240, H - 44, 150, "right")
-            g.setFont(fonts.small)
-            g.setColor(0.6, 0.6, 0.65)
-            g.printf("/ " .. (me.mag or 0), W - 86, H - 30, 62, "right")
-        end
-    end
-
-    -- ---- Mira (crosshair) en el cursor ----
-    local mx, my = love.mouse.getPosition()
-    g.setColor(1, 1, 1, 0.8)
-    g.setLineWidth(1.5)
-    g.line(mx - 9, my, mx - 3, my); g.line(mx + 3, my, mx + 9, my)
-    g.line(mx, my - 9, mx, my - 3); g.line(mx, my + 3, mx, my + 9)
-    g.setColor(1, 0.3, 0.3, 0.9)
-    g.circle("fill", mx, my, 1.2)
-    g.setLineWidth(1)
-
-    g.setFont(fonts.small)
-    g.setColor(0.55, 0.55, 0.6)
-    g.printf("WASD · Ratón apuntar · Click disparar · Click-Der ADS · R recargar · Q arma · F1 debug",
-             0, H - 18, W - 12, "right")
-end
-
--- ============================================================================
--- BANNERS de fase (waiting / intro / roundend / matchend). Sin cambios de
--- semántica respecto a la versión previa, solo presentación.
--- ============================================================================
-local function drawBanners(nc, fonts)
-    local g = love.graphics
-    local m = nc.view.match
-    local W, H = g.getWidth(), g.getHeight()
-    local gp = m.gamePhase
-
-    if gp == "waiting" then
-        g.setColor(0, 0, 0, 0.45); g.rectangle("fill", 0, H / 2 - 40, W, 80)
-        g.setFont(fonts.mid); g.setColor(1, 1, 1)
-        g.printf("Esperando a la partida...", 0, H / 2 - 16, W, "center")
-
-    elseif gp == "intro" then
-        g.setColor(0, 0, 0, 0.45); g.rectangle("fill", 0, H / 2 - 90, W, 180)
-        g.setFont(fonts.big); g.setColor(1, 1, 1)
-        g.printf("RONDA " .. m.roundNumber, 0, H / 2 - 80, W, "center")
-        g.setFont(fonts.mid); g.setColor(1, 0.85, 0.3)
-        g.printf("Loadout: " .. (m.loadout or "-"), 0, H / 2 - 10, W, "center")
-        g.setFont(fonts.small); g.setColor(0.85, 0.85, 0.85)
-        g.printf(string.format("¡Prepárate!  %0.0f", math.ceil(m.introTimer)), 0, H / 2 + 36, W, "center")
-
-    elseif gp == "roundend" then
-        g.setColor(0, 0, 0, 0.5); g.rectangle("fill", 0, H / 2 - 70, W, 140)
-        g.setFont(fonts.big)
-        local txt
-        if m.roundWinner == 0 then g.setColor(0.8, 0.8, 0.8); txt = "EMPATE"
-        elseif m.roundWinner == 1 then g.setColor(0.3, 0.65, 1.0); txt = "GANA AZUL"
-        elseif m.roundWinner == 2 then g.setColor(1.0, 0.45, 0.3); txt = "GANA ROJO"
-        else g.setColor(0.8, 0.8, 0.8); txt = "FIN DE RONDA" end
-        g.printf(txt, 0, H / 2 - 50, W, "center")
-
-    elseif gp == "matchend" then
-        g.setColor(0, 0, 0, 0.65); g.rectangle("fill", 0, H / 2 - 110, W, 220)
-        g.setFont(fonts.big)
-        if m.matchWinner == 1 then g.setColor(0.3, 0.65, 1.0)
-        else g.setColor(1.0, 0.45, 0.3) end
-        g.printf((m.matchWinner == 1 and "AZUL" or "ROJO") .. " GANA LA PARTIDA",
-                 0, H / 2 - 80, W, "center")
-        g.setFont(fonts.mid); g.setColor(1, 1, 1)
-        g.printf(m.scores[1] .. "  -  " .. m.scores[2], 0, H / 2, W, "center")
-        g.setFont(fonts.small); g.setColor(0.85, 0.85, 0.85)
-        g.printf("Nueva partida en breve...", 0, H / 2 + 50, W, "center")
-    end
-
-    g.setFont(fonts.small)
-end
-
 -- Viñeta de tensión (estirada a pantalla). Sobre el mundo, bajo el HUD.
 local function drawVignette()
     if not Assets.loaded then return end
@@ -572,6 +466,7 @@ end
 function Render.draw(nc, fonts)
     local view = nc.view
     drawArena(view)
+    drawCovers(view)          -- parapetos de madera (obstáculos del mapa)
     drawFlag(view)            -- base + zona + mástil (bajo los jugadores)
     drawGrenades(view)
 
@@ -581,12 +476,11 @@ function Render.draw(nc, fonts)
     end
 
     nc.tracers:draw()
+    nc.debris:draw()          -- escombros de coberturas rotas
     drawSmokes(view)          -- nube táctica: oculta la escena (sobre jugadores)
 
-    drawVignette()
-    nc.killfeed:draw(fonts.kf or fonts.small)
-    drawHUD(nc, fonts)
-    drawBanners(nc, fonts)
+    drawVignette()            -- viñeta de AMBIENTE (negra). El HUD/feedback los
+                              -- pinta src/ui/ui_manager.lua sobre esta capa.
 end
 
 -- Overlay de depuración (tecla F1). Rendimiento, red, fase y jugadores.

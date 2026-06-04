@@ -113,6 +113,143 @@ func TestOvertimeSuddenDeath(t *testing.T) {
 	}
 }
 
+func TestReserveAmmoReload(t *testing.T) {
+	rifle := NewWeapon(Weapons["rifle"]) // 30 / 90
+	if rifle.Ammo != 30 || rifle.Reserve != 90 {
+		t.Fatalf("estado inicial 30/90 esperado, got %d/%d", rifle.Ammo, rifle.Reserve)
+	}
+
+	// Gasta 10 balas y recarga: deben transferirse 10 desde la reserva.
+	rifle.Ammo = 20
+	if !rifle.StartReload() {
+		t.Fatal("debería poder recargar con cargador parcial y reserva > 0")
+	}
+	rifle.ReloadTimer = 0
+	rifle.completeReload()
+	if rifle.Ammo != 30 || rifle.Reserve != 80 {
+		t.Fatalf("tras recargar 10 esperaba 30/80, got %d/%d", rifle.Ammo, rifle.Reserve)
+	}
+
+	// Cargador lleno: StartReload no hace nada.
+	if rifle.StartReload() {
+		t.Fatal("no debe recargar con el cargador lleno")
+	}
+
+	// Reserva parcial: solo transfiere lo que queda.
+	rifle.Ammo = 5
+	rifle.Reserve = 7
+	rifle.completeReload()
+	if rifle.Ammo != 12 || rifle.Reserve != 0 {
+		t.Fatalf("reserva parcial: esperaba 12/0, got %d/%d", rifle.Ammo, rifle.Reserve)
+	}
+
+	// Reserva a 0: recarga bloqueada aunque el cargador esté incompleto.
+	rifle.Ammo = 5
+	if rifle.StartReload() {
+		t.Fatal("no debe recargar con reserva vacía")
+	}
+
+	// El cuchillo (munición infinita) nunca recarga.
+	knife := NewWeapon(Weapons["knife"])
+	if knife.StartReload() {
+		t.Fatal("el cuchillo no debe recargar")
+	}
+}
+
+func TestArenaSymmetry(t *testing.T) {
+	_, walls, covers := buildArena()
+	b := arenaBounds
+	cx := b.X + b.W*0.5
+	// Cada muro debe tener su reflejo exacto sobre el eje vertical central.
+	mirrored := func(list []AABB, r AABB) bool {
+		want := AABB{2*cx - r.X - r.W, r.Y, r.W, r.H}
+		for _, o := range list {
+			if o == want {
+				return true
+			}
+		}
+		return false
+	}
+	for _, r := range walls {
+		if !mirrored(walls, r) {
+			t.Fatalf("muro sin reflejo simétrico: %+v", r)
+		}
+	}
+	coverBoxes := make([]AABB, len(covers))
+	for i, c := range covers {
+		coverBoxes[i] = c.Box
+		if c.HP != coverMaxHP || !c.Active || c.ID == 0 {
+			t.Fatalf("cobertura mal inicializada: %+v", c)
+		}
+	}
+	for _, c := range covers {
+		if !mirrored(coverBoxes, c.Box) {
+			t.Fatalf("cobertura sin reflejo simétrico: %+v", c.Box)
+		}
+	}
+}
+
+func TestCoverDestructionAndReset(t *testing.T) {
+	w := NewWorld(1)
+	w.Match.StartRound(w)
+	if len(w.Covers) == 0 {
+		t.Fatal("debe haber coberturas")
+	}
+	solidsFull := len(w.Solids)
+
+	// Destruye la cobertura 0 con daño suficiente.
+	idx := 0
+	id := w.Covers[idx].ID
+	w.damageCover(idx, 100)
+	if !w.Covers[idx].Active || w.Covers[idx].HP != 50 {
+		t.Fatalf("daño parcial mal aplicado: %+v", w.Covers[idx])
+	}
+	w.damageCover(idx, 100) // total acumulado 200 > 150
+	if w.Covers[idx].Active {
+		t.Fatal("la cobertura debe romperse al llegar a 0")
+	}
+	if len(w.Breaks) != 1 || w.Breaks[0].ID != id {
+		t.Fatalf("debe emitirse un BreakEvent con el id correcto: %+v", w.Breaks)
+	}
+	if len(w.Solids) != solidsFull-1 {
+		t.Fatalf("la cobertura rota debe salir de Solids: %d vs %d", len(w.Solids), solidsFull-1)
+	}
+
+	// Una bala dirigida a esa caja ya no debe detenerse en ella.
+	c := w.Covers[idx].Box
+	ox := c.X - 50
+	oy := c.Y + c.H/2
+	hit := w.Cast(ox, oy, 1, 0, 2000, w.Players[0], false)
+	if hit.Hit && hit.Kind == HitCover && hit.CoverIdx == idx {
+		t.Fatal("la bala no debe chocar con una cobertura destruida")
+	}
+
+	// Nueva ronda restaura todas las coberturas.
+	w.Match.StartRound(w)
+	if !w.Covers[idx].Active || w.Covers[idx].HP != coverMaxHP {
+		t.Fatalf("StartRound debe restaurar la cobertura: %+v", w.Covers[idx])
+	}
+	if len(w.Solids) != solidsFull {
+		t.Fatalf("Solids debe restaurarse al completo: %d vs %d", len(w.Solids), solidsFull)
+	}
+}
+
+func TestBulletBlockedByCover(t *testing.T) {
+	w := NewWorld(1)
+	w.Match.StartRound(w)
+	c := w.Covers[0].Box
+	// Disparo horizontal que cruza el centro de la caja: debe golpearla.
+	ox := c.X - 60
+	oy := c.Y + c.H/2
+	hit := w.Cast(ox, oy, 1, 0, 2000, w.Players[0], false)
+	if !hit.Hit || hit.Kind != HitCover {
+		t.Fatalf("la bala debe impactar la cobertura activa, got hit=%v kind=%d", hit.Hit, hit.Kind)
+	}
+	if hit.X > c.X+1 {
+		t.Fatalf("el impacto debe quedarse en la cara frontal de la caja (x≈%.1f), got %.1f", c.X, hit.X)
+	}
+}
+
 func TestFullMatchWithBots(t *testing.T) {
 	w := NewWorld(2)
 	w.Start() // arranca: intro -> active...

@@ -10,7 +10,7 @@
 
 local Connection = require("src.net.connection")
 local Tracers    = require("src.entities.bullet")
-local Killfeed   = require("src.entities.killfeed")
+local Debris     = require("src.entities.debris")
 
 local atan2 = math.atan2 or math.atan
 
@@ -44,7 +44,20 @@ function NetClient.new(host, port)
     self.seq       = 0
     self.prev      = { fire = false, reload = false, swap = false }
     self.tracers   = Tracers()
-    self.killfeed  = Killfeed()
+    self.debris    = Debris()
+
+    -- Estado para la sincronización de coberturas destruibles:
+    --   snapTick  = sello de snapshot (para detectar coberturas ausentes/rotas)
+    --   lastRound = última ronda vista (al cambiar, restaura las coberturas)
+    self.snapTick  = 0
+    self.lastRound = -1
+
+    -- Callbacks de feedback (los instala la capa de UI con ui.attach). El
+    -- NetClient los invoca al parsear el flujo autoritativo, manteniéndose
+    -- desacoplado de la UI. Por defecto nil = sin oyente.
+    self.onKill        = nil   -- (victimId, killerId, weaponId)
+    self.onHit         = nil   -- (isKill)  -- impacto del jugador local
+    self.onLocalDamage = nil   -- (amount)  -- el jugador local recibió daño
 
     -- Handshake/keepalive.
     self.joinTimer = 0          -- reenvía "J" hasta conectar
@@ -59,6 +72,7 @@ function NetClient.new(host, port)
     self.view = {
         bounds   = { x = 0, y = 0, w = 0, h = 0 },
         walls    = {},
+        covers   = {}, coversMaxId = 0, -- coberturas destruibles, indexadas por id
         players  = {},
         smokes   = {}, smokesN = 0,     -- pool reutilizado (sin GC por snapshot)
         grenades = {}, grenadesN = 0,
@@ -124,7 +138,7 @@ function NetClient:update(dt)
     -- 4) Interpolación visual + decaimiento de efectos efímeros.
     self:_interpolate(dt)
     self.tracers:update(dt)
-    self.killfeed:update(dt)
+    self.debris:update(dt)
 
     -- 5) Telemetría por segundo.
     local st = self.stats
@@ -139,12 +153,15 @@ end
 
 -- ===================== Parseo del protocolo =====================
 function NetClient:_parse(packet)
+    local sawSnap = false
     for line in packet:gmatch("[^\n]+") do
         local f = split(line)
         local tag = f[1]
 
         if tag == "S" then
             self.stats.snaps = self.stats.snaps + 1
+            sawSnap = true
+            self.snapTick = self.snapTick + 1
             local m = self.view.match
             m.gamePhase   = f[2]
             m.phase       = f[3]
@@ -161,6 +178,16 @@ function NetClient:_parse(packet)
             -- Nuevo snapshot: reiniciar CONTADORES (no las tablas) de efímeros.
             self.view.smokesN   = 0
             self.view.grenadesN = 0
+            -- Cambio de ronda: el servidor restauró las coberturas; el cliente
+            -- las reactiva a vida completa para evitar desincronización visual.
+            if m.roundNumber ~= self.lastRound then
+                self.lastRound = m.roundNumber
+                local cov = self.view.covers
+                for id = 1, self.view.coversMaxId do
+                    local c = cov[id]
+                    if c then c.active = true; c.broken = false; c.hp = c.maxhp end
+                end
+            end
 
         elseif tag == "F" then
             local m = self.view.match
@@ -199,6 +226,10 @@ function NetClient:_parse(packet)
             local newAlive  = f[8] == "1"
             if prevHp and newHp < prevHp and newAlive then
                 p.hurt = 0.18
+                -- Daño al jugador LOCAL -> viñeta de daño en la UI.
+                if id == self.myId and self.onLocalDamage then
+                    self.onLocalDamage(prevHp - newHp)
+                end
             end
             if prevAlive and not newAlive then
                 p.deathAnim = 0          -- arranca el fundido del cadáver
@@ -215,9 +246,10 @@ function NetClient:_parse(packet)
             p.state     = f[9]
             p.slot      = f[10]
             p.wname     = f[11]
-            p.ammo      = tonumber(f[12]) or 0
-            p.mag       = tonumber(f[13]) or 0
-            p.reloading = f[14] == "1"
+            p.ammo        = tonumber(f[12]) or 0
+            p.mag         = tonumber(f[13]) or 0
+            p.reloading   = f[14] == "1"
+            p.reserveAmmo = tonumber(f[15]) or 0
 
         elseif tag == "K" then
             local n = self.view.smokesN + 1
@@ -254,7 +286,25 @@ function NetClient:_parse(packet)
             b.x, b.y = tonumber(f[4]) or 0, tonumber(f[5]) or 0
             b.w, b.h = tonumber(f[6]) or 0, tonumber(f[7]) or 0
             self.view.walls = {}
+            self.view.covers = {}              -- mapa nuevo: limpia coberturas
+            self.view.coversMaxId = 0
             self.connected = true
+
+        elseif tag == "BOX" then
+            -- Geometría estática de una cobertura destruible: id|x|y|w|h|maxhp.
+            local id = tonumber(f[2]) or 0
+            local x = tonumber(f[3]) or 0
+            local y = tonumber(f[4]) or 0
+            local w = tonumber(f[5]) or 0
+            local h = tonumber(f[6]) or 0
+            local maxhp = tonumber(f[7]) or 1
+            self.view.covers[id] = {
+                x = x, y = y, w = w, h = h,
+                cx = x + w * 0.5, cy = y + h * 0.5,
+                maxhp = maxhp, hp = maxhp,
+                active = true, broken = false, seen = 0,
+            }
+            if id > self.view.coversMaxId then self.view.coversMaxId = id end
 
         elseif tag == "WALL" then
             local w = self.view.walls
@@ -264,12 +314,57 @@ function NetClient:_parse(packet)
             }
 
         elseif tag == "D" then
-            -- Baja: "D|victim|killer|weaponID". Alimenta el killfeed.
-            local victim = tonumber(f[2]) or 0
-            local killer = tonumber(f[3]) or 0
-            self.killfeed:push(victim, killer, f[4], self.view.players)
+            -- Baja: "D|victim|killer|weaponID". Notifica al killfeed de la UI.
+            if self.onKill then
+                self.onKill(tonumber(f[2]) or 0, tonumber(f[3]) or 0, f[4])
+            end
+
+        elseif tag == "H" then
+            -- Impacto confirmado: "H|attacker|kill". Solo nos importa el del
+            -- jugador local (hitmarker autoritativo).
+            local attacker = tonumber(f[2]) or 0
+            if attacker == self.myId and self.onHit then
+                self.onHit(f[3] == "1")
+            end
+
+        elseif tag == "C" then
+            -- Estado de una cobertura activa: "C|id|hp". Marca vista (seen) para
+            -- la detección de rupturas, y actualiza la vida (grietas en cliente).
+            local id = tonumber(f[2]) or 0
+            local c = self.view.covers[id]
+            if c then
+                c.hp = tonumber(f[3]) or c.hp
+                c.active = true
+                c.seen = self.snapTick
+            end
+
+        elseif tag == "B" then
+            -- Ruptura inmediata: "B|id". Escombros + sacar de la vista.
+            self:_breakCover(tonumber(f[2]) or 0)
         end
     end
+
+    -- Autocorrección: tras un snapshot, cualquier cobertura activa NO listada
+    -- (su "seen" quedó atrás) debe estar rota aunque se perdiera el evento "B".
+    if sawSnap then
+        local cov = self.view.covers
+        for id = 1, self.view.coversMaxId do
+            local c = cov[id]
+            if c and c.active and not c.broken and c.seen ~= self.snapTick then
+                self:_breakCover(id)
+            end
+        end
+    end
+end
+
+-- Marca una cobertura como rota (idempotente) y lanza escombros una sola vez.
+function NetClient:_breakCover(id)
+    local c = self.view.covers[id]
+    if not c or c.broken then return end
+    c.broken = true
+    c.active = false
+    c.hp = 0
+    self.debris:burst(c.cx, c.cy)
 end
 
 -- ===================== Input local =====================

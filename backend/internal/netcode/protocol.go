@@ -11,8 +11,10 @@ package netcode
 //   "B"                          salir
 //
 // Servidor -> Cliente (un datagrama, varias líneas):
-//   "W|id|mode|bx|by|bw|bh"  +  "WALL|x|y|w|h" por muro     (bienvenida, 1 vez)
-//   "S|..."  + "F|..." + "P|..."(xN) + "K|..." + "G|..." + "T|..." + "D|..."
+//   "W|id|mode|bx|by|bw|bh" + "WALL|x|y|w|h"(xN) + "BOX|id|x|y|w|h|maxhp"(xN)
+//                                                            (bienvenida, 1 vez)
+//   "S|..." + "F|..." + "P|..."(xN) + "K|..." + "G|..." + "T|..." + "D|..."
+//                       + "H|..." + "C|id|hp"(activas) + "B|id"(rupturas)
 
 import (
 	"bytes"
@@ -69,6 +71,23 @@ func EncodeWelcome(w *game.World, playerID int) []byte {
 		b.WriteString(f1(wl.W))
 		b.WriteByte('|')
 		b.WriteString(f1(wl.H))
+	}
+	// Coberturas destruibles: geometría + vida máxima (estado dinámico llega
+	// luego en cada snapshot vía "C"). "BOX|id|x|y|w|h|maxhp".
+	for i := range w.Covers {
+		c := &w.Covers[i]
+		b.WriteString("\nBOX|")
+		b.WriteString(strconv.Itoa(c.ID))
+		b.WriteByte('|')
+		b.WriteString(f1(c.Box.X))
+		b.WriteByte('|')
+		b.WriteString(f1(c.Box.Y))
+		b.WriteByte('|')
+		b.WriteString(f1(c.Box.W))
+		b.WriteByte('|')
+		b.WriteString(f1(c.Box.H))
+		b.WriteByte('|')
+		b.WriteString(strconv.Itoa(int(c.MaxHP)))
 	}
 	return []byte(b.String())
 }
@@ -150,12 +169,13 @@ func EncodeSnapshot(b *bytes.Buffer, w *game.World) []byte {
 		b.WriteByte('|')
 		b.WriteString(p.Slot)
 		// Info de arma activa (para el HUD).
-		name, ammo, mag, reloading := "-", -1, 0, false
+		name, ammo, mag, reloading, reserve := "-", -1, 0, false, 0
 		if wpn := p.ActiveWeapon(); wpn != nil {
 			name = wpn.Def.Name
 			ammo = wpn.Ammo
 			mag = wpn.Def.MagSize
 			reloading = wpn.Reloading
+			reserve = wpn.Reserve
 		}
 		b.WriteByte('|')
 		b.WriteString(name)
@@ -165,6 +185,8 @@ func EncodeSnapshot(b *bytes.Buffer, w *game.World) []byte {
 		b.WriteString(strconv.Itoa(mag))
 		b.WriteByte('|')
 		b.WriteString(boolc(reloading))
+		b.WriteByte('|')
+		b.WriteString(strconv.Itoa(reserve))
 	}
 
 	// Humos activos.
@@ -218,6 +240,34 @@ func EncodeSnapshot(b *bytes.Buffer, w *game.World) []byte {
 		b.WriteString(strconv.Itoa(k.Killer))
 		b.WriteByte('|')
 		b.WriteString(k.Weapon)
+	}
+
+	// Impactos de este tick (para el hitmarker del atacante).
+	for i := range w.Hits {
+		h := &w.Hits[i]
+		b.WriteString("\nH|")
+		b.WriteString(strconv.Itoa(h.Attacker))
+		b.WriteByte('|')
+		b.WriteString(boolc(h.Kill))
+	}
+
+	// Estado de coberturas ACTIVAS: "C|id|hp". Enviamos el conjunto activo
+	// completo (pocas, ~12) cada snapshot: el cliente lo usa para las grietas y
+	// para autocorregirse (una cobertura ausente => rota, aunque se perdiera "B").
+	for i := range w.Covers {
+		c := &w.Covers[i]
+		if c.Active {
+			b.WriteString("\nC|")
+			b.WriteString(strconv.Itoa(c.ID))
+			b.WriteByte('|')
+			b.WriteString(strconv.Itoa(int(c.HP)))
+		}
+	}
+
+	// Rupturas de este tick (evento inmediato para escombros). "B|id".
+	for i := range w.Breaks {
+		b.WriteString("\nB|")
+		b.WriteString(strconv.Itoa(w.Breaks[i].ID))
 	}
 
 	return b.Bytes()

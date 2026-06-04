@@ -29,6 +29,19 @@ type KillEvent struct {
 	Weapon         string
 }
 
+// HitEvent: impacto confirmado en este tick. Permite al cliente del ATACANTE
+// dibujar un hitmarker autoritativo (no adivinado). Kill marca si remató.
+type HitEvent struct {
+	Attacker int
+	Kill     bool
+}
+
+// BreakEvent: una cobertura destruible se rompió en este tick (HP <= 0). El
+// cliente lo usa para lanzar partículas de escombros y dejar de dibujarla.
+type BreakEvent struct {
+	ID int
+}
+
 // Match controla rondas, temporizador, overtime, bandera y marcador.
 type Match struct {
 	RoundDuration    float64
@@ -88,7 +101,9 @@ func (m *Match) CaptureFraction() float64 { return m.CaptureProgress / m.Capture
 type World struct {
 	Mode   int
 	Bounds AABB
-	Walls  []AABB
+	Walls  []AABB   // muros de concreto indestructibles (estáticos)
+	Covers []Cover  // parapetos de madera destruibles
+	Solids []AABB   // muros + coberturas activas; usado por colisión/movimiento
 
 	Players []*Player
 	Spawns  []Spawn
@@ -107,6 +122,8 @@ type World struct {
 	// Eventos de este tick, drenados por la capa de red.
 	Tracers []TracerEvent
 	Kills   []KillEvent
+	Hits    []HitEvent
+	Breaks  []BreakEvent
 
 	rng *rand.Rand
 }
@@ -133,20 +150,46 @@ func NewWorld(mode int) *World {
 }
 
 func (w *World) buildMap() {
-	w.Bounds = AABB{X: 40, Y: 40, W: 1200, H: 640}
-	b := w.Bounds
-	cx, cy := b.X+b.W/2, b.Y+b.H/2
-	w.Walls = []AABB{
-		{cx - 130, cy - 18, 36, 36},
-		{cx + 94, cy - 18, 36, 36},
-		{cx - 18, b.Y + 90, 36, 120},
-		{cx - 18, b.Y + b.H - 210, 36, 120},
-		{b.X + 230, cy - 90, 40, 180},
-		{b.X + b.W - 270, cy - 90, 40, 180},
-		{b.X + 120, b.Y + 120, 90, 36},
-		{b.X + b.W - 210, b.Y + 120, 90, 36},
-		{b.X + 120, b.Y + b.H - 156, 90, 36},
-		{b.X + b.W - 210, b.Y + b.H - 156, 90, 36},
+	w.Bounds, w.Walls, w.Covers = buildArena()
+	w.rebuildSolids()
+}
+
+// rebuildSolids recompone la lista de rectángulos sólidos (muros + coberturas
+// ACTIVAS) que usan el movimiento y el raycast. Reutiliza el backing array, así
+// que no asigna en régimen permanente: solo se llama al iniciar ronda y cuando
+// una cobertura se rompe (eventos raros).
+func (w *World) rebuildSolids() {
+	w.Solids = w.Solids[:0]
+	w.Solids = append(w.Solids, w.Walls...)
+	for i := range w.Covers {
+		if w.Covers[i].Active {
+			w.Solids = append(w.Solids, w.Covers[i].Box)
+		}
+	}
+}
+
+// resetCovers restaura todas las coberturas destruibles al inicio de ronda.
+func (w *World) resetCovers() {
+	for i := range w.Covers {
+		w.Covers[i].HP = w.Covers[i].MaxHP
+		w.Covers[i].Active = true
+	}
+	w.rebuildSolids()
+}
+
+// damageCover aplica daño hitscan a una cobertura; si la destruye, emite el
+// evento de ruptura y la saca de la colisión.
+func (w *World) damageCover(idx int, amount float64) {
+	c := &w.Covers[idx]
+	if !c.Active {
+		return
+	}
+	c.HP -= amount
+	if c.HP <= 0 {
+		c.HP = 0
+		c.Active = false
+		w.Breaks = append(w.Breaks, BreakEvent{ID: c.ID})
+		w.rebuildSolids()
 	}
 }
 
@@ -234,8 +277,12 @@ func (w *World) fireWeapon(p *Player, weapon *Weapon, aim float64) bool {
 		dx, dy := math.Cos(ang), math.Sin(ang)
 		hit := w.Cast(ox, oy, dx, dy, def.Range, p, true)
 		w.addTracer(ox, oy, hit.X, hit.Y, def)
-		if hit.Hit && hit.Kind == HitPlayer {
-			w.applyDamage(hit.Target, def.Damage, p, def.ID)
+		if hit.Hit {
+			if hit.Kind == HitPlayer {
+				w.applyDamage(hit.Target, def.Damage, p, def.ID)
+			} else if hit.Kind == HitCover {
+				w.damageCover(hit.CoverIdx, def.Damage)
+			}
 		}
 	case Melee:
 		for _, e := range w.Players {
@@ -259,7 +306,13 @@ func (w *World) fireWeapon(p *Player, weapon *Weapon, aim float64) bool {
 }
 
 func (w *World) applyDamage(target *Player, amount float64, attacker *Player, weaponID string) {
-	if target.ApplyDamage(amount, attacker) {
+	wasAlive := target.Alive
+	killed := target.ApplyDamage(amount, attacker)
+	// Impacto confirmado para el hitmarker del atacante (solo si hizo daño real).
+	if attacker != nil && wasAlive && amount > 0 {
+		w.Hits = append(w.Hits, HitEvent{Attacker: attacker.ID, Kill: killed})
+	}
+	if killed {
 		killer := 0
 		if attacker != nil {
 			killer = attacker.ID
@@ -307,6 +360,8 @@ func (w *World) clearTransient() {
 func (w *World) ClearEvents() {
 	w.Tracers = w.Tracers[:0]
 	w.Kills = w.Kills[:0]
+	w.Hits = w.Hits[:0]
+	w.Breaks = w.Breaks[:0]
 }
 
 // Step avanza el mundo un paso fijo dt según la fase de alto nivel.
@@ -469,6 +524,7 @@ func (m *Match) StartRound(w *World) {
 		p.Spawn(sp.X, sp.Y, entry)
 	}
 	w.clearTransient()
+	w.resetCovers() // restaura todos los parapetos a vida completa
 }
 
 func (m *Match) tallies(w *World) (alive1, alive2, inFlag1, inFlag2 int) {

@@ -33,7 +33,7 @@ func (g *Grenade) Update(dt float64, w *World) bool {
 		f = 0
 	}
 	g.Vel = g.Vel.Scale(f)
-	MoveAndSlide(&g.Pos, g.Radius, g.Vel.X*dt, g.Vel.Y*dt, w.Walls, w.Bounds)
+	MoveAndSlide(&g.Pos, g.Radius, g.Vel.X*dt, g.Vel.Y*dt, w.Solids, w.Bounds)
 	g.Fuse -= dt
 	if g.Fuse <= 0 {
 		g.Active = false

@@ -122,7 +122,7 @@ func (p *Player) Update(dt float64, w *World) {
 		speed *= weapon.Def.ADSMoveMult
 	}
 	p.Vel = Vec{mx * speed, my * speed}
-	MoveAndSlide(&p.Pos, p.Radius, p.Vel.X*dt, p.Vel.Y*dt, w.Walls, w.Bounds)
+	MoveAndSlide(&p.Pos, p.Radius, p.Vel.X*dt, p.Vel.Y*dt, w.Solids, w.Bounds)
 
 	// ---- Armas ----
 	if weapon != nil {
