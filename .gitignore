@@ -1,0 +1,40 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/go/pkg
+/go/bin
+/backend/bin
+
+# Go workspace
+/go.work
+
+# Lua/LÖVE
+*.luac
+
+# Build artifacts
+/dist
+/build
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temp
+*.log
+*.tmp
+
+# Environment
+.env
+.env.local
