@@ -407,7 +407,7 @@ local function drawMenu(app)
     g.setFont(F.title); SC(UI_COLORS.yellow)
     g.print("GULAG ARENA", menu.x, 150)
     g.setFont(F.mid); SC(UI_COLORS.grey)
-    g.print("1v1 / 2v2 SHOWDOWN  ·  BACKEND AUTORITATIVO", menu.x, 220)
+    g.print("1v1 / 2v2 SHOWDOWN", menu.x, 220)
 
     -- Estado intermedio "Conectando..." con spinner geométrico.
     if app and app.state == "CONNECTING" then
@@ -471,7 +471,7 @@ local function drawMenu(app)
 
     -- Pie.
     g.setFont(F.small); SC(UI_COLORS.grey)
-    g.printf("Arranca el backend:  cd backend  &&  go run ./cmd/server",
+    g.printf("Version 1.0.0",
              0, H - 36, W - 40, "right")
 end
 
